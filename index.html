@@ -26,6 +26,7 @@ table{width:100%;border-collapse:collapse;font-size:.88rem;margin-top:6px}
 td{padding:4px 6px;border-top:1px solid var(--line)}
 td:last-child{text-align:right}
 .link{background:none;color:var(--btn);padding:0;font-weight:600}
+.sub{font-size:.95rem;margin:20px 0 0;color:var(--mut);font-weight:600}
 </style>
 </head>
 <body>
@@ -77,12 +78,42 @@ function card(m, n) {
     : `${k} out of ${n} chose ${esc(outs[0][0])}`;
   const bar = outs.map(([o, v], i) => `<i style="width:${(v / n) * 100}%;background:${COLORS[i % 5]}"></i>`).join('');
   const legend = outs.map(([o, v], i) => `<span style="color:${COLORS[i % 5]}">&#9679;</span> ${esc(o)} ${v}`).concat([`hedged ${hedged}`, `no position ${n - m.stances.length}`]).join(' &nbsp; ');
+  const cash = {};
+  for (const s of m.stances) if (!s.split) cash[s.outcome] = (cash[s.outcome] || 0) + s.stake;
+  const whaleMoney = outs.map(([o]) => `${esc(o)} ${usd(cash[o])}`).join(' &nbsp; ');
   const rows = roster
     .map((r) => [r, m.stances.find((s) => s.wallet === r.wallet)])
     .filter((x) => x[1])
     .map(([r, s]) => `<tr><td>${esc(r.name)}</td><td>${s.split ? 'hedged' : esc(s.outcome)}</td><td>${usd(s.stake)}</td></tr>`)
     .join('');
-  return `<div class="card"><div class="mut">${esc(m.question)}</div><div class="big">${head}</div><div class="bar">${bar}</div><div class="mut" style="margin-top:8px">${legend}</div><details><summary>Who is where</summary><table>${rows}</table></details></div>`;
+  return `<div class="card"><div class="mut">${esc(m.question)}</div><div class="big">${head}</div><div class="bar">${bar}</div><div class="mut" style="margin-top:8px">${legend}</div><div class="mut">Whale money: ${whaleMoney}</div><details><summary>Who is where</summary><table>${rows}</table></details></div>`;
+}
+
+function moneyCard(m) {
+  const tot = m.sides.reduce((s, x) => s + x.value, 0) || 1;
+  const bar = m.sides.map((x, i) => `<i style="width:${(x.value / tot) * 100}%;background:${COLORS[i % 5]}"></i>`).join('');
+  const rows = m.sides.map((x, i) => `<tr><td><span style="color:${COLORS[i % 5]}">&#9679;</span> ${esc(x.name)}</td><td>${Math.round(x.price * 100)}&cent;</td><td>${x.holders} holders</td><td>${usd(x.value)}</td></tr>`).join('');
+  return `<div class="card"><div class="mut">${esc(m.question)}</div><div class="big">${usd(m.volume)} traded</div><div class="bar">${bar}</div><table>${rows}</table>` +
+    `<div class="mut" style="margin-top:8px">${usd(m.volume24h)} traded in the last 24 hours. Open interest ${usd(m.openInterest)}. Money held is the value of shares owned by the top 500 holders on each side at current prices.</div></div>`;
+}
+
+function spreadSection(spreads, ml) {
+  if (!spreads.length) return '';
+  let best = null;
+  for (const m of spreads)
+    m.sides.forEach((x, i) => {
+      const against = m.sides.reduce((a, y, k) => a + (k === i ? 0 : y.whales), 0);
+      const net = x.whales - against;
+      if (x.whales >= 3 && net >= 3 && (!best || net > best.net || (net === best.net && x.price < best.x.price))) best = { m, x, net, against };
+    });
+  const pickHtml = best
+    ? `<div class="card"><div class="mut">Whales' favorite spread</div><div class="big">${esc(best.m.question)}: ${esc(best.x.name)}</div><div class="mut">${best.x.whales} whales vs ${best.against}, ${usd(best.x.stake)} of whale money. Priced at ${Math.round(best.x.price * 100)}&cent;.</div></div>`
+    : `<div class="card"><div class="mut">No spread has clear whale agreement yet (at least 3 whales and a lead of 3).</div></div>`;
+  const rows = spreads.map((m) => `<tr><td>${esc(m.question)}<div class="mut">${usd(m.volume)} traded</div></td>` +
+    m.sides.map((x) => `<td>${esc(x.name)}<br>${Math.round(x.price * 100)}&cent; &middot; ${x.whales} whales</td>`).join('') + '</tr>').join('');
+  const ref = ml ? `Moneyline: ${ml.sides.map((x) => `${esc(x.name)} ${Math.round(x.price * 100)}&cent;`).join(', ')}. ` : '';
+  return '<p class="sub">Spreads</p>' + pickHtml +
+    `<div class="card"><div style="overflow-x:auto"><table>${rows}</table></div><div class="mut" style="margin-top:8px">${ref}Each price is the market's chance that side covers. Whale counts are tracked wallets on that side.</div></div>`;
 }
 
 async function check(input) {
@@ -91,7 +122,7 @@ async function check(input) {
   try {
     await ensureRoster();
     const j = await api('/api/consensus?event=' + encodeURIComponent(input) + '&wallets=' + roster.map((r) => r.wallet).join(','));
-    out.innerHTML = `<h2>${esc(j.event.title)}</h2>` +
+    out.innerHTML = `<h2>${esc(j.event.title)}</h2>` + ((j.money || []).length ? '<p class="sub">Where the money is</p>' + j.money.map(moneyCard).join('') : '') + spreadSection(j.spreads || [], (j.money || [])[0]) + '<p class="sub">Where the whales are</p>' +
       (j.markets.length ? j.markets.map((m) => card(m, j.checked)).join('') : '<p>None of the tracked wallets hold a position in this event.</p>');
   } catch (e) {
     out.innerHTML = `<p>${esc(e.message)}</p>`;
@@ -104,7 +135,7 @@ async function loadPicks() {
   try {
     await ensureRoster();
     const j = await api('/api/scan?wallets=' + roster.map((r) => r.wallet).join(','));
-    box.innerHTML = '<h2>Games the whales agree on</h2>' + (j.picks.length
+    box.innerHTML = '<h2>Games the whales agree on</h2><p class="mut">Ranked by whales on the lead side minus whales against.</p>' + (j.picks.length
       ? j.picks.map((p) => pick(p, j.checked)).join('')
       : '<p class="mut">No upcoming game has enough whale agreement right now. Check back closer to game time.</p>');
   } catch (e) {
