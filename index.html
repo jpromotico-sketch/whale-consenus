@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Whale consensus</title>
+<style>
+:root{--bg:#f7f8fa;--fg:#15181d;--mut:#667085;--card:#fff;--line:#e3e6eb;--btn:#1d4ed8}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1116;--fg:#e7eaee;--mut:#98a1b0;--card:#171b22;--line:#272d37;--btn:#3b6df0}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:680px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.4rem;margin:0 0 2px;letter-spacing:-.01em}
+h2{font-size:1.1rem;margin:22px 0 4px}
+.mut{color:var(--mut);font-size:.88rem}
+form{display:flex;gap:8px;margin:16px 0 8px}
+input{flex:1;min-width:0;padding:11px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);font:inherit}
+button{padding:11px 18px;border:0;border-radius:8px;background:var(--btn);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+:focus-visible{outline:2px solid var(--btn);outline-offset:2px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}
+.big{font-size:1.5rem;font-weight:700;letter-spacing:-.02em;margin:2px 0 10px}
+.bar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--line)}
+.bar i{display:block}
+details{margin-top:10px}summary{cursor:pointer;color:var(--mut);font-size:.88rem}
+table{width:100%;border-collapse:collapse;font-size:.88rem;margin-top:6px}
+td{padding:4px 6px;border-top:1px solid var(--line)}
+td:last-child{text-align:right}
+.link{background:none;color:var(--btn);padding:0;font-weight:600}
+</style>
+</head>
+<body>
+<main>
+  <h1>Whale consensus</h1>
+  <p class="mut" style="margin:0">Where Polymarket's best sports bettors are positioned on upcoming games.</p>
+  <div id="picks"></div>
+  <h2>Check a specific game</h2>
+  <form>
+    <input id="q" placeholder="Paste a polymarket.com/event/... link" autocomplete="off" aria-label="Polymarket event link">
+    <button>Check</button>
+  </form>
+  <div id="out"></div>
+  <details id="roster"><summary>Loading the whale list…</summary></details>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const COLORS = ['#2563eb', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6'];
+const usd = (x) => '$' + Math.round(x).toLocaleString();
+let roster = [], rosterP;
+const ensureRoster = () => (rosterP ??= loadRoster().catch((e) => { rosterP = null; throw e; }));
+
+async function api(path) {
+  const r = await fetch(path);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'Request failed (' + r.status + ')');
+  return j;
+}
+
+async function loadRoster() {
+  const j = await api('/api/roster');
+  roster = j.roster;
+  $('#roster').innerHTML =
+    `<summary>Tracking ${roster.length} wallets, updated ${esc(new Date(j.updated).toLocaleString())}</summary>` +
+    `<table>${roster.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.name)}</td><td>${(r.roi * 100).toFixed(1)}&cent; per share</td><td>${usd(r.pnl)}</td></tr>`).join('')}</table>` +
+    `<p class="mut">Sports only. Ranked by all-time profit per share traded, among the top sports wallets by profit who traded sports in the last 30 days. Politics and other markets are ignored.</p>`;
+}
+
+function card(m, n) {
+  const c = {};
+  let hedged = 0;
+  for (const s of m.stances) s.split ? hedged++ : (c[s.outcome] = (c[s.outcome] || 0) + 1);
+  const outs = Object.entries(c).sort((a, b) => b[1] - a[1]);
+  const k = outs.length ? outs[0][1] : 0;
+  const tied = outs.filter((o) => o[1] === k);
+  const head = !outs.length ? `No wallet has taken a side`
+    : tied.length > 1 ? `${k} out of ${n} on each of ${tied.map((o) => esc(o[0])).join(' and ')}`
+    : `${k} out of ${n} chose ${esc(outs[0][0])}`;
+  const bar = outs.map(([o, v], i) => `<i style="width:${(v / n) * 100}%;background:${COLORS[i % 5]}"></i>`).join('');
+  const legend = outs.map(([o, v], i) => `<span style="color:${COLORS[i % 5]}">&#9679;</span> ${esc(o)} ${v}`).concat([`hedged ${hedged}`, `no position ${n - m.stances.length}`]).join(' &nbsp; ');
+  const rows = roster
+    .map((r) => [r, m.stances.find((s) => s.wallet === r.wallet)])
+    .filter((x) => x[1])
+    .map(([r, s]) => `<tr><td>${esc(r.name)}</td><td>${s.split ? 'hedged' : esc(s.outcome)}</td><td>${usd(s.stake)}</td></tr>`)
+    .join('');
+  return `<div class="card"><div class="mut">${esc(m.question)}</div><div class="big">${head}</div><div class="bar">${bar}</div><div class="mut" style="margin-top:8px">${legend}</div><details><summary>Who is where</summary><table>${rows}</table></details></div>`;
+}
+
+async function check(input) {
+  const out = $('#out');
+  out.innerHTML = '<p class="mut">Checking positions…</p>';
+  try {
+    await ensureRoster();
+    const j = await api('/api/consensus?event=' + encodeURIComponent(input) + '&wallets=' + roster.map((r) => r.wallet).join(','));
+    out.innerHTML = `<h2>${esc(j.event.title)}</h2>` +
+      (j.markets.length ? j.markets.map((m) => card(m, j.checked)).join('') : '<p>None of the tracked wallets hold a position in this event.</p>');
+  } catch (e) {
+    out.innerHTML = `<p>${esc(e.message)}</p>`;
+  }
+}
+
+async function loadPicks() {
+  const box = $('#picks');
+  box.innerHTML = '<h2>Games the whales agree on</h2><p class="mut">Scanning whale positions…</p>';
+  try {
+    await ensureRoster();
+    const j = await api('/api/scan?wallets=' + roster.map((r) => r.wallet).join(','));
+    box.innerHTML = '<h2>Games the whales agree on</h2>' + (j.picks.length
+      ? j.picks.map((p) => pick(p, j.checked)).join('')
+      : '<p class="mut">No upcoming game has enough whale agreement right now. Check back closer to game time.</p>');
+  } catch (e) {
+    box.innerHTML = `<p>${esc(e.message)}</p>`;
+  }
+}
+
+function pick(p, n) {
+  const when = p.live ? 'Live or started' : p.start ? new Date(p.start).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : '';
+  return `<div class="card"><div class="mut">${esc(p.title)}${when ? ', ' + esc(when) : ''}</div>` +
+    `<div class="big">${p.count} out of ${n} chose ${esc(p.outcome)}</div>` +
+    `<div class="mut">${esc(p.question)}. ${p.against} on the other side, ${p.hedged} hedged. Market price ${Math.round(p.price * 100)}&cent;.</div>` +
+    `<p style="margin:8px 0 0"><button class="link" data-slug="${esc(p.slug)}">See who is where</button></p></div>`;
+}
+$('#picks').onclick = (e) => {
+  const slug = e.target.dataset.slug;
+  if (slug) { $('#q').value = slug; check(slug); $('#out').scrollIntoView(); }
+};
+
+$('form').onsubmit = (e) => {
+  e.preventDefault();
+  const v = $('#q').value.trim();
+  if (!v) return;
+  history.replaceState(null, '', '?e=' + encodeURIComponent(v));
+  check(v);
+};
+const start = new URLSearchParams(location.search).get('e');
+loadPicks();
+ensureRoster().catch((e) => ($('#roster').innerHTML = `<summary>${esc(e.message)}</summary>`));
+if (start) { $('#q').value = start; check(start); }
+</script>
+</body>
+</html>
