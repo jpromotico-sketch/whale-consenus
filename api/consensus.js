@@ -14,6 +14,41 @@ function slugOf(s) {
   }
 }
 
+const parse = (s) => { try { return JSON.parse(s); } catch { return []; } };
+
+// Polymarket's type label for spreads isn't confirmed in the docs, so also match the title.
+const isSpread = (m) => /^spreads?$/i.test(m.sportsMarketType || '') || /^spread\b/i.test(m.question || '');
+
+// Market-wide money on the game's main markets: everyone, not just tracked wallets.
+// "value" = shares held by the top 500 holders of each side, at the current price.
+async function money(ev) {
+  let mks = (ev.markets || []).filter((m) => m.sportsMarketType === 'moneyline');
+  if (!mks.length) mks = (ev.markets || []).slice(0, 3);
+  mks = mks.slice(0, 3);
+  if (!mks.length) return [];
+  const ids = mks.map((m) => m.conditionId).join(',');
+  const [h, oi] = await Promise.all([
+    getJson(`${DATA}/v2/holders?condition=${ids}&limit=500`),
+    getJson(`${DATA}/v2/oi?condition=${ids}`),
+  ]);
+  const oiBy = Object.fromEntries(oi.data.map((r) => [r.condition_id.toLowerCase(), r.value]));
+  const byToken = Object.fromEntries(h.data.map((g) => [g.token_id, g.holders]));
+  return mks.map((m) => {
+    const names = parse(m.outcomes), prices = parse(m.outcomePrices).map(Number), toks = parse(m.clobTokenIds);
+    return {
+      question: m.question,
+      volume: Math.round(Number(m.volumeNum) || 0),
+      volume24h: Math.round(Number(m.volume24hr) || 0),
+      openInterest: Math.round(oiBy[m.conditionId.toLowerCase()] || 0),
+      sides: names.map((name, i) => {
+        const hs = byToken[toks[i]] || [];
+        const shares = hs.reduce((s, x) => s + x.amount, 0);
+        return { name, price: prices[i], holders: hs.length, value: Math.round(shares * prices[i]) };
+      }),
+    };
+  });
+}
+
 export default async function handler(req, res) {
   try {
     const slug = slugOf(req.query.event || '');
@@ -32,10 +67,10 @@ export default async function handler(req, res) {
       ])
     );
 
-    const perWallet = await pool(wallets, 6, async (w) => {
+    const [perWallet, moneyData] = await Promise.all([pool(wallets, 6, async (w) => {
       const r = await getJson(`${DATA}/v2/positions?user=${w}&event_id=${ev.id}&limit=500`);
       return { w, rows: r.data };
-    });
+    }), money(ev).catch(() => [])]);
 
     // stake = what the wallet paid for the shares it still holds
     const stakes = {};
@@ -47,7 +82,26 @@ export default async function handler(req, res) {
         s[p.outcome] = (s[p.outcome] || 0) + p.current_size * p.avg_price;
       }
 
-    const list = Object.entries(stakes).map(([c, ws]) => ({
+    const spreadMarkets = (ev.markets || []).filter((m) => isSpread(m) && !m.closed);
+    const spreadIds = new Set(spreadMarkets.map((m) => m.conditionId.toLowerCase()));
+    const spreads = spreadMarkets
+      .map((m) => {
+        const names = parse(m.outcomes), prices = parse(m.outcomePrices).map(Number);
+        const st = Object.values(stakes[m.conditionId.toLowerCase()] || {}).map(stance);
+        return {
+          question: m.question,
+          line: m.line ?? null,
+          volume: Math.round(Number(m.volumeNum) || 0),
+          sides: names.map((name, i) => {
+            const mine = st.filter((s) => !s.split && s.outcome === name);
+            return { name, price: prices[i], whales: mine.length, stake: mine.reduce((a, s) => a + s.stake, 0) };
+          }),
+        };
+      })
+      .sort((a, b) => Math.abs(a.line ?? 0) - Math.abs(b.line ?? 0))
+      .slice(0, 20);
+
+    const list = Object.entries(stakes).filter(([c]) => !spreadIds.has(c)).map(([c, ws]) => ({
       conditionId: c,
       ...markets.get(c),
       stances: Object.entries(ws).map(([wallet, sides]) => ({ wallet, ...stance(sides) })),
@@ -60,6 +114,8 @@ export default async function handler(req, res) {
     res.status(200).json({
       event: { title: ev.title, slug },
       checked: wallets.length,
+      money: moneyData,
+      spreads,
       markets: list.slice(0, 15),
     });
   } catch (e) {
